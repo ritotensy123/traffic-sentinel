@@ -1,0 +1,100 @@
+services:
+  database:
+    image: timescale/timescaledb:latest-pg15
+    container_name: traffic-sentinel-database
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  backend:
+    image: node:20-alpine
+    container_name: traffic-sentinel-backend
+    restart: unless-stopped
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    env_file: .env
+    volumes:
+      - ./backend:/app
+    networks:
+      - internal
+      - external
+    depends_on:
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:4000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: traffic-sentinel-frontend
+    restart: unless-stopped
+    networks:
+      - external
+    depends_on:
+      - backend
+
+  simulator:
+    image: node:20-alpine
+    container_name: traffic-sentinel-simulator
+    restart: unless-stopped
+    working_dir: /app
+    command: sh -c "npm install && npm start"
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      API_URL: ${SIMULATOR_API_URL}
+      API_KEY: ${SIMULATOR_API_KEY}
+      REQUESTS_PER_SECOND: ${REQUESTS_PER_SECOND}
+      BATCH_SIZE: ${BATCH_SIZE}
+    volumes:
+      - ./simulator:/app
+    networks:
+      - external
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: traffic-sentinel-nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_HTTP_PORT}:80"
+      - "${NGINX_HTTPS_PORT}:443"
+    networks:
+      - external
+    depends_on:
+      - frontend
+      - backend
+
+networks:
+  internal:
+    driver: bridge
+    internal: true
+  external:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+
